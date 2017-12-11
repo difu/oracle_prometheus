@@ -1,0 +1,2 @@
+cx-Oracle==6.0.3
+prometheus-client==0.0.21
