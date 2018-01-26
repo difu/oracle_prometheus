@@ -17,19 +17,20 @@ database_sid = 'UNKNOWN'
 def get_db_details(conn):
     global hostname
     global database_sid
+    global is_cdb
     cursor = conn.cursor()
-    cursor.execute("select db.name, inst.host_name from v$database db, v$instance inst")
+    cursor.execute("select db.name, inst.host_name, cdb from v$database db, v$instance inst")
     row = cursor.fetchone()
     database_sid = row[0]
     hostname = row[1]
+    is_cdb = (row[2] == "YES")
     cursor.close()
 
 
-#@REQUEST_TIME.time()
 def scrape_wait_classes(conn):
     cursor = conn.cursor()
     # Statement taken from http://www.oaktable.net/content/wait-event-and-wait-class-metrics-vs-vsystemevent
-    cursor.execute("select n.wait_class, round(m.time_waited/m.INTSIZE_CSEC,3) AAS"
+    cursor.execute("select lower(n.wait_class), round(m.time_waited/m.INTSIZE_CSEC,3) AAS"
                    " from v$waitclassmetric  m, v$system_wait_class n where m.wait_class_id=n.wait_class_id"
                    " and n.wait_class != 'Idle' union select  'CPU', round(value/100,3) AAS from v$sysmetric"
                    " where metric_name='CPU Usage Per Sec' and group_id=2 "
@@ -45,13 +46,58 @@ def scrape_wait_classes(conn):
     cursor.close()
 
 
-#@REQUEST_TIME.time()
-def count_sessions(conn):
+def scrape_sessions(conn):
     cursor = conn.cursor()
     cursor.execute("select con_id, username, count(*) from v$session where type ='USER' group by username, con_id")
     for result in cursor:
         print (result)
         NUMBER_OF_SESSIONS.labels(hostname, database_sid, result[0], result[1]).set(result[2])
+    cursor.close()
+
+
+def scrape_tablespace_usage(conn):
+    cursor = conn.cursor()
+    # Statement taken from http://www.dba-oracle.com/t_tablespace_script.htm
+    cursor.execute("select"
+                   "   a.con_id,"
+                   "   a.tablespace_name,"
+                   "   a.bytes_alloc/(1024*1024) \"TOTAL ALLOC (MB)\","
+                   "   a.physical_bytes/(1024*1024) \"TOTAL PHYS ALLOC (MB)\","
+                   "   nvl(b.tot_used,0)/(1024*1024) \"USED (MB)\","
+                   "   (nvl(b.tot_used,0)/a.bytes_alloc)*100 \"% USED\" "
+                   "from"
+                   "   (select "
+                   "      tablespace_name,"
+                   "      con_id,"
+                   "      sum(bytes) physical_bytes,"
+                   "      sum(decode(autoextensible,'NO',bytes,'YES',maxbytes)) bytes_alloc"
+                   "    from" 
+                   "      cdb_data_files"
+                   "    group by "
+                   "       con_id, tablespace_name ) a,"
+                   "   (select "
+                   "      tablespace_name,"
+                   "      con_id,"
+                   "      sum(bytes) tot_used"
+                   "    from "
+                   "      cdb_segments"
+                   "    group by "
+                   "      con_id, tablespace_name ) b "
+                   "where "
+                   "   a.tablespace_name = b.tablespace_name (+) and"
+                   "   a.con_id = b.con_id (+) "
+                   "and "
+                   "   a.tablespace_name not in" 
+                   "   (select distinct "
+                   "       tablespace_name" 
+                   "    from "
+                   "       cdb_temp_files) "
+                   "and "
+                   "   a.tablespace_name not like 'UNDO%' "
+                   "order by 1,2")
+    for result in cursor:
+        print (result)
+
     cursor.close()
 
 
@@ -66,7 +112,8 @@ if __name__ == '__main__':
     get_db_details(connection)
 
     while True:
-        time.sleep(1)
-        count_sessions(connection)
+        scrape_sessions(connection)
         scrape_wait_classes(connection)
+        scrape_tablespace_usage(connection)
+        time.sleep(10)
 
