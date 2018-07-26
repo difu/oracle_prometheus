@@ -1,6 +1,7 @@
 from __future__ import print_function
 from prometheus_client import start_http_server, Summary, Counter, Gauge
 import time
+import argparse
 
 
 import cx_Oracle
@@ -31,7 +32,8 @@ def get_db_details(conn):
 def scrape_wait_classes(conn):
     cursor = conn.cursor()
     # Statement taken from http://www.oaktable.net/content/wait-event-and-wait-class-metrics-vs-vsystemevent
-    cursor.execute("select replace(replace(lower(n.wait_class),' ','_'),'/',''), round(m.time_waited/m.INTSIZE_CSEC,3) AAS"
+    cursor.execute("select replace(replace(lower(n.wait_class),' ','_'),'/',''),"
+                   "round(m.time_waited/m.INTSIZE_CSEC,3) AAS"
                    " from v$waitclassmetric  m, v$system_wait_class n where m.wait_class_id=n.wait_class_id"
                    " and n.wait_class != 'Idle' union select  'CPU', round(value/100,3) AAS from v$sysmetric"
                    " where metric_name='CPU Usage Per Sec' and group_id=2 "
@@ -42,7 +44,7 @@ def scrape_wait_classes(conn):
                    "( select  'CPU', round(value/100,3) cpu from v$sysmetric"
                    " where metric_name='CPU Usage Per Sec' and group_id=2) aas")
     for result in cursor:
-        print (result)
+        print(result)
         WAIT_CLASSES.labels(hostname, database_sid, result[0]).set(result[1])
     cursor.close()
 
@@ -52,7 +54,7 @@ def scrape_sessions(conn):
     cursor.execute("select con_id, username, service_name, count(*) "
                    "from v$session where type ='USER' group by username, con_id, service_name")
     for result in cursor:
-        print (result)
+        print(result)
         NUMBER_OF_SESSIONS.labels(hostname, database_sid, result[0], result[1], result[2]).set(result[3])
     cursor.close()
 
@@ -98,21 +100,39 @@ def scrape_tablespace_usage(conn):
                    "   a.tablespace_name not like 'UNDO%' "
                    "order by 1,2")
     for result in cursor:
-        print (result)
+        print(result)
         total_alloc = result[2]
         if total_alloc is not None:
             total_alloc = float(total_alloc)
         else:
             total_alloc = 0
-        TABLESPACE_TOTAL_USAGE.labels(hostname, database_sid,  result[0],  result[1]).set(total_alloc)
+        TABLESPACE_TOTAL_USAGE.labels(hostname, database_sid, result[0], result[1]).set(total_alloc)
 
     cursor.close()
 
 
 if __name__ == '__main__':
+    connect_string = ""
 
-    connection = cx_Oracle.connect("sys", "Oradoc_db1",
-                                   "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVER=DEDICATED)(SERVICE_NAME=ORCLCDB.localdomain)))", mode = cx_Oracle.SYSDBA)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-c", "--config", required=False,
+                        help="name of the configuration file")
+    parser.add_argument("-s", "--connectstring", required=False,
+                        help="database connect string")
+    parser.add_argument("--oneshot", action='store_true',
+                        help="Just scrape once and finish",
+                        default=False)
+
+    args = parser.parse_args()
+
+    oneshot = args.oneshot
+
+    if args.connectstring is None:
+        pass
+    else:
+        connect_string = args.connectstring
+
+    connection = cx_Oracle.connect(connect_string)
 
     # Start up the server to expose the metrics.
     start_http_server(8000)
@@ -123,5 +143,7 @@ if __name__ == '__main__':
         scrape_sessions(connection)
         scrape_wait_classes(connection)
         scrape_tablespace_usage(connection)
+        if oneshot:
+            exit(0)
         time.sleep(10)
 
