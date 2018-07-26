@@ -7,8 +7,9 @@ import cx_Oracle
 
 # Create a metric to track time spent and requests made.
 REQUEST_TIME = Summary('request_processing_seconds', 'Time spent processing request')
-NUMBER_OF_SESSIONS = Gauge('number_of_sessions', 'Number of sessions', ['host', 'sid', 'con_id', 'username'])
+NUMBER_OF_SESSIONS = Gauge('number_of_sessions', 'Number of sessions', ['host', 'sid', 'con_id', 'service_name', 'username'])
 WAIT_CLASSES = Gauge('wait_class', 'Wait Class', ['host', 'sid', 'wait_class'])
+TABLESPACE_TOTAL_USAGE = Gauge('tablespace_total_usage', 'Tablespace Usage', ['host', 'sid', 'con_id', 'tablespace_name'])
 
 hostname = 'UNKNOWN'
 database_sid = 'UNKNOWN'
@@ -30,7 +31,7 @@ def get_db_details(conn):
 def scrape_wait_classes(conn):
     cursor = conn.cursor()
     # Statement taken from http://www.oaktable.net/content/wait-event-and-wait-class-metrics-vs-vsystemevent
-    cursor.execute("select lower(n.wait_class), round(m.time_waited/m.INTSIZE_CSEC,3) AAS"
+    cursor.execute("select replace(replace(lower(n.wait_class),' ','_'),'/',''), round(m.time_waited/m.INTSIZE_CSEC,3) AAS"
                    " from v$waitclassmetric  m, v$system_wait_class n where m.wait_class_id=n.wait_class_id"
                    " and n.wait_class != 'Idle' union select  'CPU', round(value/100,3) AAS from v$sysmetric"
                    " where metric_name='CPU Usage Per Sec' and group_id=2 "
@@ -48,10 +49,11 @@ def scrape_wait_classes(conn):
 
 def scrape_sessions(conn):
     cursor = conn.cursor()
-    cursor.execute("select con_id, username, count(*) from v$session where type ='USER' group by username, con_id")
+    cursor.execute("select con_id, username, service_name, count(*) "
+                   "from v$session where type ='USER' group by username, con_id, service_name")
     for result in cursor:
         print (result)
-        NUMBER_OF_SESSIONS.labels(hostname, database_sid, result[0], result[1]).set(result[2])
+        NUMBER_OF_SESSIONS.labels(hostname, database_sid, result[0], result[1], result[2]).set(result[3])
     cursor.close()
 
 
@@ -61,7 +63,7 @@ def scrape_tablespace_usage(conn):
     cursor.execute("select"
                    "   a.con_id,"
                    "   a.tablespace_name,"
-                   "   a.bytes_alloc/(1024*1024) \"TOTAL ALLOC (MB)\","
+                   "   a.bytes_alloc \"TOTAL ALLOC\","
                    "   a.physical_bytes/(1024*1024) \"TOTAL PHYS ALLOC (MB)\","
                    "   nvl(b.tot_used,0)/(1024*1024) \"USED (MB)\","
                    "   (nvl(b.tot_used,0)/a.bytes_alloc)*100 \"% USED\" "
@@ -97,6 +99,12 @@ def scrape_tablespace_usage(conn):
                    "order by 1,2")
     for result in cursor:
         print (result)
+        total_alloc = result[2]
+        if total_alloc is not None:
+            total_alloc = float(total_alloc)
+        else:
+            total_alloc = 0
+        TABLESPACE_TOTAL_USAGE.labels(hostname, database_sid,  result[0],  result[1]).set(total_alloc)
 
     cursor.close()
 
